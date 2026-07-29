@@ -2675,7 +2675,7 @@ mod tests {
         let workspace = tmp.join("pkg-a");
         let cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(&workspace).unwrap();
-        let result = (|| {
+        let result = {
             let files = vec![PathBuf::from("src/App.svelte")];
             materialize_overlay_with(
                 Path::new("."),
@@ -2683,7 +2683,7 @@ mod tests {
                 Some(Path::new("./tsconfig.json")),
                 false,
             )
-        })();
+        };
         std::env::set_current_dir(&cwd).unwrap();
         result.unwrap();
 
@@ -2820,5 +2820,23 @@ mod tests {
 
             let _ = fs::remove_dir_all(&tmp);
         }
+    }
+
+    #[test]
+    fn svelte_jsx_shim_types_svelte_boundary_onerror() {
+        // #1889: the embedded `svelte-jsx-v4.d.ts`'s `IntrinsicElements` had
+        // no `'svelte:boundary'` entry, so `svelteHTML.createElement(
+        // "svelte:boundary", { onerror: e => ... })` fell through to the
+        // interface's `[name: string]: { [name: string]: any }` catch-all —
+        // every prop (including `onerror`) contextually typed as bare `any`,
+        // which doesn't propagate a parameter type to an inline arrow
+        // function the way an actual function-typed prop would, so `e`
+        // surfaced as a false `implicit any`.
+        assert!(
+            SHIM_SVELTE_JSX_V4.contains("'svelte:boundary'"),
+            "svelte-jsx-v4.d.ts must declare an IntrinsicElements entry for \
+             'svelte:boundary' (onerror/failed/pending), not fall through to \
+             the catch-all index signature"
+        );
     }
 }
