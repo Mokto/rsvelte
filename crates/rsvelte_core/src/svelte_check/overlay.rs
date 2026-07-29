@@ -193,10 +193,18 @@ pub fn materialize_overlay_with(
     // the mirrors to already exist to re-point an aliased cross-package
     // import at its shadow.
     let external = discover_external_svelte_packages(workspace, &cache_dir, tsconfig_path);
-    let mut ext_root_dir_pairs: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(external.len());
+    let ext_root_dir_pairs: Vec<(PathBuf, PathBuf)> = external
+        .iter()
+        .map(|pkg| (pkg.real_dir.clone(), pkg.mirror_dir.clone()))
+        .collect();
     for pkg in &external {
-        emit_external_shadows(pkg)?;
-        ext_root_dir_pairs.push((pkg.real_dir.clone(), pkg.mirror_dir.clone()));
+        emit_external_shadows(
+            pkg,
+            workspace,
+            &emit_dir,
+            svelte_resolver.as_ref(),
+            &ext_root_dir_pairs,
+        )?;
     }
 
     let mut entries = Vec::with_capacity(files.len());
@@ -489,7 +497,13 @@ fn symlink_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// its cache mirror, preserving each file's path relative to the package root.
 /// Non-incremental (external packages change rarely and are bounded by the
 /// dependency set).
-fn emit_external_shadows(pkg: &ExternalPackage) -> Result<(), OverlayError> {
+fn emit_external_shadows(
+    pkg: &ExternalPackage,
+    workspace: &Path,
+    emit_dir: &Path,
+    resolver: Option<&oxc_resolver::Resolver>,
+    ext_pairs: &[(PathBuf, PathBuf)],
+) -> Result<(), OverlayError> {
     // Mirror the package's own `node_modules` into the shadow dir so the
     // shadow's bare-package imports (`import type { X } from 'sortablejs'`,
     // incl. its `@types/*` declarations) resolve from the SAME context as the
@@ -539,6 +553,17 @@ fn emit_external_shadows(pkg: &ExternalPackage) -> Result<(), OverlayError> {
         let mut tsx_code = result.code.clone();
         if let Some(spec) = companion_reexport_specifier(abs_source, &tsx_path) {
             let _ = writeln!(tsx_code, "\nexport * from \"{spec}\";");
+        }
+        // An external package commonly imports its OWN components through the
+        // same public alias its consumers use (`$lib/Input.svelte` from
+        // inside `SelectionMenu.svelte`, both living in the same package) —
+        // without this, that self-referential import is left unrewritten,
+        // falls back to the ambient `*.svelte` wildcard, and poisons any
+        // `ComponentProps<typeof Input>` a consumer computes through it (#1887).
+        if let Some(resolver) = resolver {
+            tsx_code = rewrite_aliased_svelte_imports(
+                &tsx_code, abs_source, &tsx_path, workspace, emit_dir, resolver, ext_pairs,
+            );
         }
         fs::write(&tsx_path, &tsx_code)?;
         let import_basename = tsx_path
@@ -2463,5 +2488,74 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn relative_tsconfig_path_still_bridges_a_node_modules_sibling_package() {
+        // With a relative `--tsconfig`, oxc_resolver's tsconfig discovery
+        // silently returns `NotFound` for any `paths` target that resolves
+        // outside the CWD via `..` — exactly what a workspace-sibling
+        // package reached through a `node_modules` symlink needs when it ALSO
+        // imports itself through a `paths` alias (#1887's self-referential
+        // case). This is the CLI's own documented usage
+        // (`--tsconfig ./tsconfig.json`).
+        #[cfg(unix)]
+        {
+            let tmp = std::env::temp_dir().join(format!("svc_relcfg_nm_{}", std::process::id()));
+            let _ = fs::remove_dir_all(&tmp);
+            fs::create_dir_all(tmp.join("pkg-a/src")).unwrap();
+            fs::create_dir_all(tmp.join("pkg-a/node_modules")).unwrap();
+            fs::create_dir_all(tmp.join("pkg-libs/lib")).unwrap();
+            fs::write(
+                tmp.join("pkg-a/tsconfig.json"),
+                "{\"compilerOptions\":{\"paths\":{\"$lib/*\":[\"../pkg-libs/lib/*\"]}}}",
+            )
+            .unwrap();
+            fs::write(
+                tmp.join("pkg-libs/lib/Input.svelte"),
+                "<script lang=\"ts\">let { n }: { n: number } = $props();</script>\n<input value={n} />\n",
+            )
+            .unwrap();
+            fs::write(
+                tmp.join("pkg-libs/lib/Field.svelte"),
+                "<script lang=\"ts\">import Input from '$lib/Input.svelte';</script>\n<Input n={1} />\n",
+            )
+            .unwrap();
+            fs::write(
+                tmp.join("pkg-a/src/App.svelte"),
+                "<script lang=\"ts\">import Field from 'libs/Field.svelte';</script>\n<Field />\n",
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(
+                tmp.join("pkg-libs/lib"),
+                tmp.join("pkg-a/node_modules/libs"),
+            )
+            .unwrap();
+
+            let workspace = tmp.join("pkg-a");
+            let cwd = std::env::current_dir().unwrap();
+            std::env::set_current_dir(&workspace).unwrap();
+            let result = {
+                let files = vec![PathBuf::from("src/App.svelte")];
+                materialize_overlay_with(
+                    Path::new("."),
+                    &files,
+                    Some(Path::new("./tsconfig.json")),
+                    false,
+                )
+            };
+            std::env::set_current_dir(&cwd).unwrap();
+            result.unwrap();
+
+            let field_tsx =
+                fs::read_to_string(workspace.join(".svelte-check/ext/0/Field.svelte.tsx"))
+                    .expect("external Field.svelte shadow should have been emitted");
+            assert!(
+                !field_tsx.contains("$lib/Input.svelte"),
+                "self-referential alias was not rewritten with a relative --tsconfig path:\n{field_tsx}"
+            );
+
+            let _ = fs::remove_dir_all(&tmp);
+        }
     }
 }
