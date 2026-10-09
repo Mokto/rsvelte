@@ -51,6 +51,7 @@ jobs:
         run: |
           VERSION="${VERSION#svelte-check-v}"
           pkg="apps/npm/svelte-check-${{ matrix.triple }}"
+          mkdir -p "$GITHUB_WORKSPACE/stage"
           cp "target/${{ matrix.target }}/dist/svelte_check" "$pkg/svelte-check"
           chmod +x "$pkg/svelte-check"
           (cd "$pkg" && npm pkg set version="$VERSION" && npm pack --ignore-scripts --pack-destination "$GITHUB_WORKSPACE/stage")
