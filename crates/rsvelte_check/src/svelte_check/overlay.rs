@@ -365,7 +365,10 @@ pub fn fallback_svelte_types(
 }
 
 /// Walk `node_modules` upwards from `from` for the `svelte` package, the
-/// Rust equivalent of `require.resolve('svelte/package.json', { paths })`.
+/// Rust equivalent of `require.resolve('svelte/package.json', { paths })`,
+/// realpath included: under pnpm, `svelte-html.d.ts` listed by its symlink
+/// path loads a second `elements.d.ts` whose `import('clsx')` can't resolve,
+/// and package-ID dedupe makes that copy's `ClassValue = any` win everywhere.
 fn resolve_svelte_package(from: &Path) -> Option<SveltePackage> {
     let mut cursor = Some(from);
     while let Some(dir) = cursor {
@@ -378,7 +381,7 @@ fn resolve_svelte_package(from: &Path) -> Option<SveltePackage> {
                 .and_then(|v| v.get("version")?.as_str().map(str::to_owned))
                 .and_then(|v| v.split('.').next()?.parse().ok());
             return Some(SveltePackage {
-                dir: pkg_dir,
+                dir: fs::canonicalize(&pkg_dir).unwrap_or(pkg_dir),
                 major,
             });
         }
@@ -5915,6 +5918,27 @@ mod tests {
             vec![SHIM_SHIMS_V4_NAME, SHIM_NATIVE_JSX_NAME]
         );
         assert_eq!(selected.svelte_html, expected_svelte_html(&tmp));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn global_types_name_svelte_html_by_its_realpath_under_pnpm() {
+        let tmp = std::env::temp_dir().join(format!("svc_gt_pnpm_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        let store = tmp.join("node_modules/.pnpm/svelte@5.56.8");
+        fake_svelte_package(&store, "5.56.8", true);
+        let app = tmp.join("app");
+        fs::create_dir_all(app.join("node_modules")).unwrap();
+        std::os::unix::fs::symlink(
+            store.join("node_modules/svelte"),
+            app.join("node_modules/svelte"),
+        )
+        .unwrap();
+
+        let selected = select_global_types(&app, &app.join(".svelte-check"));
+        assert_eq!(selected.svelte_html, expected_svelte_html(&store));
 
         let _ = fs::remove_dir_all(&tmp);
     }

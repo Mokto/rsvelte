@@ -331,6 +331,11 @@ jobs:
       # the corpus itself. Generating it here was pure overhead (and a frequent
       # cold-cache stall on the infrequently-run macOS shards), so it's removed.
 
+      # Fork only: shard 3 ran the standard runner out of disk mid-build.
+      - name: Free runner disk
+        if: runner.os == 'Linux'
+        run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+
       - name: Run tests
         # Default features only: `--all-features` would enable `napi`, which only
         # links cleanly when loaded from Node.js (`cargo test` would otherwise hit
